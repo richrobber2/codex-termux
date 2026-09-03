@@ -177,7 +177,8 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
     if opts.open_browser {
         #[cfg(target_os = "android")]
         {
-            let _ = std::process::Command::new("termux-open-url")
+            let _ = std::process::Command::new("am")
+                .args(["start", "-a", "android.intent.action.VIEW", "-d"])
                 .arg(&auth_url)
                 .status();
         }

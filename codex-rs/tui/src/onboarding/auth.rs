@@ -1010,6 +1010,17 @@ pub(super) fn maybe_open_auth_url_in_browser(request_handle: &AppServerRequestHa
         return;
     }
 
+    #[cfg(target_os = "android")]
+    {
+        if let Err(err) = std::process::Command::new("am")
+            .args(["start", "-a", "android.intent.action.VIEW", "-d"])
+            .arg(url)
+            .status()
+        {
+            tracing::warn!("failed to open browser for login URL: {err}");
+        }
+    }
+    #[cfg(not(target_os = "android"))]
     if let Err(err) = webbrowser::open(url) {
         tracing::warn!("failed to open browser for login URL: {err}");
     }
