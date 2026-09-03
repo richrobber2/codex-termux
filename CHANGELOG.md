@@ -1,3 +1,268 @@
+# [0.150.1] - 2026-08-29
+
+Final release of the fork, aligned with the upstream OpenAI Codex `rust-v0.150.1`
+base. The fork and its npm package are end-of-life after this release: no
+further upstream alignments, features, bug fixes, or support are planned.
+Existing releases remain available as-is. Active development continues on
+[codex-vl](https://github.com/DioNanos/codex-vl).
+
+## Fork fixes carried in this release
+
+- AGENTS.md discovery re-runs while nothing has been found, so a file created
+  mid-session by `/init` is picked up (#14).
+- The status indicator reports "Waiting for background terminal" without
+  running its animation while the session only polls background terminal
+  output (#16).
+- Remote attachment paths under `/tmp/codex-remote-attachments` are mapped back
+  to the client's real files in app-server (#21).
+- `apply_patch`/exec approval is honoured where no sandbox can exist by
+  construction, with deny-read restrictions still enforced on every bypass path
+  (#22, first shipped in 0.149.3).
+
+## Upstream alignment (rust-v0.149.1 -> rust-v0.150.1)
+
+~208 upstream commits, including: retained-image compaction budget enabled by
+default (#41003), agent role loading extracted into a dedicated crate, multi-agent
+v2 child reload through the parent, Guardian isolation and structured approval
+reviews, hooks for interrupted turns, managed AWS keys for Bedrock, OTEL turn
+cost metric.
+
+# [0.149.4] - 2026-08-28
+
+Fork patch release on the upstream OpenAI Codex `rust-v0.149.1` base. Brings
+three fork fixes that were written for this line but missed the `0.149.3`
+packaging (they lived on `develop`, whose upstream base is older), plus the
+AGENTS.md discovery hardening.
+
+## Fixed
+
+- Remote filesystem attachments (issue #21) map `/tmp/codex-remote-attachments`
+  onto the writable Android temporary directory, including local image inputs.
+- Filesystem watch notifications preserve absolute client paths (fs watch on
+  Termux kept reporting unusable paths).
+- The TUI status indicator slows down while it only waits on a background
+  terminal, instead of redrawing at full rate (issue #16).
+- AGENTS.md discovery re-runs while no instructions have been found, so an
+  AGENTS.md created after startup (e.g. by `/init`) is picked up (issue #14).
+
+# [0.149.3] - 2026-08-27
+
+Fork patch release on the upstream OpenAI Codex `rust-v0.149.1` base.
+
+## Fixed
+
+- `apply_patch` now honours an explicit user approval on platforms that cannot
+  provide a sandbox by construction (Android/Termux): the approval is no longer
+  discarded into an unenforceable sandbox request, an unrelated failure after
+  the bypass is not misclassified as a sandbox denial, and deny-read filesystem
+  restrictions still block every bypass path (issue #22).
+- The release contract now distinguishes a checkout without upstream tags
+  (declared limitation) from a missing specific base tag (still fails), so
+  provenance verification no longer breaks on tag-less checkouts.
+- The npm package version and the Cargo workspace version now match: with npm
+  `0.149.2` and Cargo `0.149.1`, TUI and doctor compared the latest npm version
+  against `CARGO_PKG_VERSION` and every fresh install immediately showed a
+  false "update available" notice.
+
+# [0.149.2] - 2026-08-26
+
+Fork follow-up release aligned with the upstream OpenAI Codex `rust-v0.149.1`.
+The fork uses `0.149.2` because it adds its own Termux fixes on top of that
+upstream base.
+
+## Fixed
+
+- Preserved the Termux compatibility improvements carried by the `rust-v0.149.1`
+  merge, including a slower status redraw while a background terminal is only
+  waiting.
+- Remote filesystem attachments now use the writable Android temporary
+  directory, including local image inputs; filesystem watch notifications are
+  translated back to the client's path namespace.
+- Custom model catalogs whose instructions field is present but empty no longer
+  silently run without usable base instructions. The package checks the content,
+  not only the field's presence, and supplies built-in instructions when no
+  usable catalog instructions are available.
+
+## Compatibility
+
+- The package remains `@mmmbuto/codex-cli-termux` for Android ARM64.
+
+# [0.149.1] - 2026-08-25
+
+Release aligned with the upstream OpenAI Codex `rust-v0.149.1` stable release.
+
+## Fixed
+
+- Remote filesystem attachments are mapped to the writable Android temporary
+  directory for filesystem operations and local image inputs.
+- Filesystem watch notifications are translated back to the client path
+  namespace.
+- Foreground remote-control sockets use the platform temporary directory.
+
+## Compatibility
+
+- The package remains `@mmmbuto/codex-cli-termux` for Android ARM64.
+
+# [0.147.3] - 2026-08-10
+
+Fork-only patch release on top of the upstream OpenAI Codex `rust-v0.147.0`
+stable release. Upstream has no `rust-v0.147.3`.
+
+## Fixed
+
+- **Code mode ran without the V8 sandbox.** `code-mode-runtime` depends on the
+  `v8` crate with `v8_enable_sandbox`, and the v8 build script derives the
+  prebuilt's name from the enabled features. Setting `RUSTY_V8_ARCHIVE` overrides
+  that name without checking it, and the Android build pointed it at the plain
+  prebuilt. Everything compiled, linked and ran, code mode worked, and
+  `v8::V8::is_sandbox_enabled()` was `false` — with no error, no warning and
+  nothing at runtime that said so. Every 0.147.0, 0.147.1 and 0.147.2 install is
+  affected.
+
+  The Android package now links a prebuilt built with the sandbox feature,
+  pinned by checksum, and the build verifies the archive it actually linked by
+  decoding what `v8__V8__IsSandboxEnabled` returns rather than trusting the file
+  name.
+
+## Added
+
+- **An Android V8 prebuilt with the sandbox.** No such archive existed anywhere,
+  upstream or otherwise, so it is now built from source for
+  `aarch64-linux-android` in CI and published with its checksums, alongside the
+  plain one.
+
+# [0.147.2] - 2026-08-08
+
+Fork-only patch release on top of the upstream OpenAI Codex `rust-v0.147.0`
+stable release. Upstream has no `rust-v0.147.2`.
+
+## Fixed
+
+- **Code mode did not work.** Since `rust-v0.147.0` upstream runs code mode out
+  of process: the CLI spawns `codex-code-mode-host` next to its own binary and
+  fails closed when it is absent, reporting `Code Mode is unavailable ... host
+  executable was not found`. That binary was never built or packaged, so code
+  mode was dead on every install of 0.147.0 and 0.147.1. It now ships with the
+  package, and the build reads the finished tarball back to prove it is there.
+# [0.147.1] - 2026-08-08
+
+Fork-only patch release on top of the upstream OpenAI Codex `rust-v0.147.0`
+stable release. No upstream changes are included: upstream has no `rust-v0.147.1`.
+
+## Fixed
+
+- **Codex could not start on Termux.** Storage under
+  `/data/data/com.termux/files` does not implement advisory file locks, and the
+  thread writer lock added upstream in `rust-v0.147.0` treated a missing lock as
+  a fatal error. Starting a session failed with
+  `thread-store internal error: failed to acquire thread writer coordination
+  lock ...: lock() not supported`. A lock the filesystem cannot provide now
+  degrades to running without it, matching how the rest of this fork already
+  handles advisory locks.
+
+  Where the lock is unavailable, single-writer ownership of a thread is no
+  longer enforced and a second writer on the same thread is not detected. Every
+  other lock failure stays fatal.
+
+`0.147.0` remains available on the `next` channel; it does not start on Termux.
+# [0.147.0] - 2026-08-07
+
+Termux release synchronized to the upstream OpenAI Codex `rust-v0.147.0` stable
+release, published on the `latest` channel.
+
+## Changed
+
+- Integrated upstream `rust-v0.147.0`. Upstream tagged it a day after
+  `0.147.0-alpha.13`; the two are siblings off the same parent and differ only
+  in the workspace version, so the fork tracks the stable directly.
+- Moved the Android V8 prebuild to `150.4.0`, matching the `v8 = "=150.4.0"` the
+  upstream workspace now requires.
+- Bumped the Cargo workspace and npm package versions to `0.147.0`.
+
+## Fixed
+
+- An `AGENTS.md` created during a session — which is what `/init` does — is now
+  discovered. Discovery cached its result under the environment selection, which
+  does not change when a file appears, so the session kept reporting that none
+  existed (issue #14).
+- The model catalog parses again. Upstream added its own legacy
+  `base_instructions` key whose serializer also flattens `ModelInfo`, so with the
+  fork field serialized too the catalog carried the key twice. The field is now
+  outside serde.
+- Models whose catalog entry ships no instruction template get the fork's
+  fallback instructions again. The merge had replaced that branch with upstream's,
+  which returns an empty string; a behavioural test now fails if it is emptied
+  again.
+- Pairing reports how to start the daemon when none is listening.
+
+## Removed
+
+- The Termux TLS root patch (#24). Upstream removed the last `reqwest` client
+  this crate built for itself, and the dependency went with it, so the guard no
+  longer compiled. MCP OAuth discovery now runs on the injected
+  `codex-http-client`, which never constructs the platform verifier that panics
+  on Android. Whether that path's native root store works under Termux has not
+  been measured on a device.
+
+# [0.146.1] - 2026-08-07
+
+Termux release synchronized to upstream OpenAI Codex `rust-v0.146.1`. Published
+on the `next` channel; `latest` moved to `0.147.0`. (This entry originally read
+as a gated candidate; it is amended here to record what was actually shipped.)
+
+## Changed
+
+- Integrated the upstream `rust-v0.146.1` patch release (backported safer
+  cyber-model auto-review defaults). No fork-owned path was touched by the
+  merge.
+- Bumped the Cargo workspace and npm package versions to `0.146.1`.
+
+## Fixed
+
+- The Android V8 prebuild script now ships the `v8_String_WriteFlags_*`
+  compatibility aliases in the published binding, not only in the checkout used
+  to build it. Consumers fetch that file verbatim, so a prebuild produced from
+  a clean run previously failed the Android build on undeclared symbols.
+
+# [0.146.0] - 2026-07-29
+
+Candidate Termux release synchronized to final upstream OpenAI Codex
+`rust-v0.146.0`. Publication remains gated on the sanitized artifact audit and
+device validation.
+
+## Changed
+
+- Integrated the final upstream `rust-v0.146.0` release.
+- Preserved the verified Android/Termux compatibility and release-profile
+  contracts, including the fork-owned updater and installer channels.
+- Bumped the Cargo workspace and npm package versions to `0.146.0`.
+
+# [0.145.0] - 2026-07-23
+
+Synced the complete Termux fork directly to the final upstream OpenAI Codex
+`rust-v0.145.0` release, without carrying the parallel alpha-only update and
+installer surfaces. The Android/Termux compatibility delta remains applied.
+
+## Changed
+- Integrated the complete upstream `rust-v0.145.0` stable release.
+- Preserved every verified Termux patch, including Android TLS roots, PTY and
+  lock compatibility, real in-process V8 code-mode, bundled libc++, and
+  `RUNPATH=$ORIGIN` packaging hardening.
+- Kept all installer, update, feedback, and release surfaces on the
+  `DioNanos/codex-termux` and `@mmmbuto/codex-cli-termux` channels.
+- Updated stale update-available snapshots so they assert the fork-owned
+  install commands and release URLs.
+- Kept hidden `apply_patch` and re-exec aliases bound to the native ELF by
+  setting `CODEX_SELF_EXE` to `codex.bin`, not the package shell wrapper.
+- Extended safe `ENOTSUP` degradation to the bounded message-history batch
+  reader added upstream, while credential and certificate locks remain
+  fail-closed.
+- Added the complete Apache `LICENSE` and project `NOTICE` to the published npm
+  payload.
+- Aligned the documented minimum Android version with the API 29 NDK target
+  used by the release workflow.
+- Bumped the npm package and Cargo workspace versions to `0.145.0`.
+
 # [0.144.5] - 2026-07-17
 
 Synced the complete Termux fork to the final upstream OpenAI Codex

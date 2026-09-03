@@ -14,7 +14,7 @@
 #   The fork's scripts/prepare_rusty_v8_android_source.py does the git checkout
 #   but only inits 4 submodules and leaves the android-specific gn/bindgen setup
 #   to the caller. This script wraps it and fills every gap discovered while
-#   getting a real 149.2.0 android build through (2026-06-08, VPS3).
+#   getting a real 149.2.0 Android build through on the maintainer runner.
 #
 # STATUS (2026-06-08)
 #   COMPLETE end-to-end: V8 compiles from source for aarch64-linux-android
@@ -25,6 +25,34 @@
 #   build_rusty_v8_android.sh --tag v149.2.0 [--ndk r28c] [--jobs N]
 #
 set -euo pipefail
+
+# SUPERSEDED (2026-08-09) by .github/workflows/rusty-v8-android-release.yml.
+#
+# This script builds the PLAIN profile. Since rust-v0.147.0, code mode enables
+# the v8 crate's `v8_enable_sandbox` feature, and a plain archive links and runs
+# with the sandbox absent while saying nothing about it -- which is exactly the
+# defect the 0.147.x corrective exists to fix. Publishing what this produces
+# under the current release layout would put that archive back in front of the
+# consumers.
+#
+# The workflow supersedes it in full: it builds either profile, verifies the
+# result by decoding what `v8__V8__IsSandboxEnabled` returns, and publishes with
+# the profile in the artifact name. The obstacles documented above are solved
+# there too, which is why this file is kept readable rather than deleted.
+#
+# Refuse by default rather than sit here as a working path to the wrong artifact.
+if [ "${CODEX_ALLOW_SUPERSEDED_V8_BUILDER:-0}" != "1" ]; then
+  cat >&2 <<'SUPERSEDED'
+scripts/build_rusty_v8_android.sh is superseded and builds the PLAIN V8 profile.
+Code mode requires the sandbox profile; a plain archive links, runs, and reports
+nothing while the sandbox is absent.
+
+Use .github/workflows/rusty-v8-android-release.yml (input `sandbox: true`).
+Set CODEX_ALLOW_SUPERSEDED_V8_BUILDER=1 only to study this path, never to
+produce an artifact meant for release.
+SUPERSEDED
+  exit 1
+fi
 
 TAG=""
 NDK_REV="r28c"                 # NDK package revision (r28c == 28.2.13676358)
@@ -154,6 +182,20 @@ OUT="${REPO_ROOT}/.artifacts/rusty-v8-android-${TAG}"
 mkdir -p "$OUT"
 cp "$A" "${OUT}/librusty_v8_release_aarch64-linux-android.a"
 cp "$B" "${OUT}/src_binding_release_aarch64-linux-android.rs"
+# OBSTACLE 7, second half: the patch above lands in the checkout's src/binding.rs,
+# which is what makes the crate compile HERE. The artifact we publish is the
+# GENERATED binding from gn_out, which never saw that patch — consumers fetch it
+# verbatim (scripts/fetch_rusty_v8_android.py pins its sha256), so without the
+# aliases the fork's android build fails on undeclared v8_String_WriteFlags_*.
+# The v149.2.0 artifact was fixed up by hand; do it here so it cannot be forgotten.
+if ! grep -q 'v8_String_WriteFlags_kNullTerminate' "${OUT}/src_binding_release_aarch64-linux-android.rs"; then
+  cat >> "${OUT}/src_binding_release_aarch64-linux-android.rs" <<PATCH
+
+// Compatibility aliases: v8 crate ${TAG#v} string.rs uses v8_String_WriteFlags_ prefix
+pub const v8_String_WriteFlags_kNullTerminate: WriteFlags__bindgen_ty_1 = WriteFlags_kNullTerminate;
+pub const v8_String_WriteFlags_kReplaceInvalidUtf8: WriteFlags__bindgen_ty_1 = WriteFlags_kReplaceInvalidUtf8;
+PATCH
+fi
 gzip -kf9 "${OUT}/librusty_v8_release_aarch64-linux-android.a"
 ( cd "$OUT" && sha256sum librusty_v8_release_aarch64-linux-android.a.gz src_binding_release_aarch64-linux-android.rs )
 log "artifacts in ${OUT}"

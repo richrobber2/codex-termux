@@ -5,17 +5,18 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import urlopen
 
-from .targets import REPO_ROOT
-from .targets import TargetSpec
-
+from .targets import REPO_ROOT, TargetSpec
 
 DOWNLOAD_TIMEOUT_SECS = 120
+V8_ARTIFACT_PROFILE = "ptrcomp_sandbox_release"
 
 
 @dataclass(frozen=True)
@@ -30,9 +31,6 @@ def resolve_codex_v8_cargo_env(
     environ: Mapping[str, str] | None = None,
     cache_root: Path | None = None,
 ) -> dict[str, str]:
-    if spec.is_windows:
-        return {}
-
     environ = os.environ if environ is None else environ
     if environ.get("V8_FROM_SOURCE") in {"true", "1", "yes"}:
         return {}
@@ -40,6 +38,13 @@ def resolve_codex_v8_cargo_env(
     archive_override = environ.get("RUSTY_V8_ARCHIVE")
     binding_override = environ.get("RUSTY_V8_SRC_BINDING_PATH")
     if archive_override and binding_override:
+        # Returning {} leaves cargo inheriting os.environ, so these two paths are
+        # what the build links -- this function chooses nothing but still decides
+        # everything. Judging the override here is the only thing between a
+        # release build and the plain archive: the profile is not in the path, the
+        # v8 build script accepts whatever RUSTY_V8_ARCHIVE names, and the result
+        # links and runs with the sandbox absent.
+        assert_sandbox_archive(Path(archive_override))
         return {}
     if archive_override or binding_override:
         raise RuntimeError(
@@ -47,10 +52,41 @@ def resolve_codex_v8_cargo_env(
         )
 
     artifacts = fetch_codex_v8_artifacts(spec, cache_root=cache_root)
+    # Downloaded from the pinned URL for the sandbox profile, and still checked:
+    # the pin says which bytes, not what they do.
+    assert_sandbox_archive(artifacts.archive)
     return {
         "RUSTY_V8_ARCHIVE": str(artifacts.archive),
         "RUSTY_V8_SRC_BINDING_PATH": str(artifacts.binding),
     }
+
+
+def assert_sandbox_archive(archive: Path) -> None:
+    """Stop the build unless this archive's V8 really carries the sandbox.
+
+    Delegates to scripts/check_v8_sandbox.py, which decodes what
+    `v8__V8__IsSandboxEnabled` returns. Exit 1 means the sandbox is absent and
+    exit 2 means the archive could not be judged; neither is a build worth
+    finishing, so both stop here rather than being told apart.
+    """
+    checker = REPO_ROOT / "scripts" / "check_v8_sandbox.py"
+    if not checker.is_file():
+        raise RuntimeError(
+            f"{checker} is missing, so nothing would verify the V8 this build "
+            "links. Restore it rather than building without it."
+        )
+    completed = subprocess.run(
+        [sys.executable, str(checker), str(archive)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"refusing to build against {archive}:\n"
+            f"{completed.stdout}{completed.stderr}".rstrip()
+        )
+    print(f"[v8] sandbox verified in {archive}")
 
 
 def fetch_codex_v8_artifacts(
@@ -59,20 +95,23 @@ def fetch_codex_v8_artifacts(
     version: str | None = None,
     cache_root: Path | None = None,
 ) -> RustyV8ArtifactPair:
-    if spec.is_windows:
-        raise RuntimeError(
-            f"No Codex-built V8 release artifacts for target: {spec.target}"
-        )
-
     version = version or resolved_v8_crate_version()
     release_url = (
         f"https://github.com/openai/codex/releases/download/rusty-v8-v{version}"
     )
     target = spec.target
     cache_dir = (cache_root or default_cache_root()) / f"rusty-v8-{version}-{target}"
-    archive = cache_dir / f"librusty_v8_release_{target}.a.gz"
-    binding = cache_dir / f"src_binding_release_{target}.rs"
-    checksums = cache_dir / f"rusty_v8_release_{target}.sha256"
+
+    if spec.is_windows:
+        archive_name = f"rusty_v8_{V8_ARTIFACT_PROFILE}_{target}.lib.gz"
+    else:
+        archive_name = f"librusty_v8_{V8_ARTIFACT_PROFILE}_{target}.a.gz"
+    binding_name = f"src_binding_{V8_ARTIFACT_PROFILE}_{target}.rs"
+    checksums_name = f"rusty_v8_{V8_ARTIFACT_PROFILE}_{target}.sha256"
+
+    archive = cache_dir / archive_name
+    binding = cache_dir / binding_name
+    checksums = cache_dir / checksums_name
 
     download_file(f"{release_url}/{checksums.name}", checksums)
     expected_checksums = load_checksums(checksums, {archive.name, binding.name})

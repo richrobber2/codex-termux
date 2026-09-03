@@ -13,8 +13,11 @@ pub struct ElevatedSandboxProfileCaptureRequest<'a> {
     pub env_map: HashMap<String, String>,
     pub timeout_ms: Option<u64>,
     pub cancellation: Option<crate::WindowsSandboxCancellationToken>,
+    // TODO(anp): Reconcile this private-desktop copy with the supplied sandbox context
+    // (TurnEnvironment::sandbox_context for turns), preserving this launch snapshot.
     pub use_private_desktop: bool,
     pub proxy_enforced: bool,
+    pub network_proxy_restricting_sid: Option<String>,
     pub read_roots_override: Option<&'a [PathBuf]>,
     pub read_roots_include_platform_defaults: bool,
     pub write_roots_override: Option<&'a [PathBuf]>,
@@ -110,6 +113,7 @@ mod windows_impl {
             cancellation,
             use_private_desktop,
             proxy_enforced,
+            network_proxy_restricting_sid,
             read_roots_override,
             read_roots_include_platform_defaults,
             write_roots_override,
@@ -190,6 +194,7 @@ mod windows_impl {
                 codex_home: sandbox_base.clone(),
                 real_codex_home: codex_home.to_path_buf(),
                 cap_sids,
+                network_proxy_restricting_sid,
                 timeout_ms,
                 tty: false,
                 stdin_open: false,

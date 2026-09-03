@@ -15,12 +15,12 @@ use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::text::Text;
 use ratatui::widgets::Paragraph;
-use ratatui::widgets::WidgetRef;
+use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app_event_sender::AppEventSender;
 use crate::key_hint;
-use crate::key_hint::KeyBinding;
+use crate::key_hint::ShortcutHint;
 use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
 use crate::motion::MotionMode;
 use crate::motion::ReducedMotionIndicator;
@@ -32,8 +32,21 @@ use crate::tui::FrameRequester;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_lines;
 
+/// Header the chat widget sets while it is only polling a background terminal.
+/// Defined here and used by the producer as well, so the two cannot drift: the
+/// indicator's animation rate keys off this exact state.
+pub(crate) const WAITING_ON_BACKGROUND_TERMINAL_HEADER: &str = "Waiting for background terminal";
+
 pub(crate) const STATUS_DETAILS_DEFAULT_MAX_LINES: usize = 3;
 const DETAILS_PREFIX: &str = "  └ ";
+
+fn frame_interval_for_header(header: &str) -> Duration {
+    if header == WAITING_ON_BACKGROUND_TERMINAL_HEADER {
+        Duration::from_millis(200)
+    } else {
+        Duration::from_millis(32)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StatusDetailsCapitalization {
@@ -50,7 +63,7 @@ pub(crate) struct StatusIndicatorWidget {
     /// Optional suffix rendered after the elapsed/interrupt segment.
     inline_message: Option<String>,
     show_interrupt_hint: bool,
-    interrupt_binding: Option<KeyBinding>,
+    interrupt_binding: Option<ShortcutHint>,
 
     elapsed_running: Duration,
     last_resume_at: Instant,
@@ -89,7 +102,7 @@ impl StatusIndicatorWidget {
             details_max_lines: STATUS_DETAILS_DEFAULT_MAX_LINES,
             inline_message: None,
             show_interrupt_hint: true,
-            interrupt_binding: Some(key_hint::plain(KeyCode::Esc)),
+            interrupt_binding: Some(key_hint::plain(KeyCode::Esc).into()),
             elapsed_running: Duration::ZERO,
             last_resume_at: Instant::now(),
             is_paused: false,
@@ -101,8 +114,7 @@ impl StatusIndicatorWidget {
     }
 
     pub(crate) fn interrupt(&self) {
-        self.app_event_tx
-            .interrupt_and_restore_prompt_if_no_output();
+        self.app_event_tx.interrupt();
     }
 
     /// Update the animated header label (left of the brackets).
@@ -140,7 +152,6 @@ impl StatusIndicatorWidget {
             .filter(|message| !message.is_empty());
     }
 
-    #[cfg(test)]
     pub(crate) fn header(&self) -> &str {
         &self.header
     }
@@ -154,7 +165,7 @@ impl StatusIndicatorWidget {
         self.show_interrupt_hint = visible;
     }
 
-    pub(crate) fn set_interrupt_binding(&mut self, binding: Option<KeyBinding>) {
+    pub(crate) fn set_interrupt_binding(&mut self, binding: Option<ShortcutHint>) {
         self.interrupt_binding = binding;
     }
 
@@ -243,9 +254,15 @@ impl Renderable for StatusIndicatorWidget {
         }
 
         if self.animations_enabled {
-            // Schedule next animation frame.
-            self.frame_requester
-                .schedule_frame_in(Duration::from_millis(32));
+            // Schedule next animation frame. While the agent is only waiting on
+            // a background terminal there is nothing to animate at 31 fps, and
+            // the redraws are not free: on Android this measured around 30% CPU
+            // in the TUI thread, with the compiler it was waiting for running as
+            // a separate process (codex-termux#16, reported with measurements by
+            // @rebroad). Slow the indicator down for that state alone rather
+            // than everywhere, so nothing changes while the model is working.
+            let interval = frame_interval_for_header(&self.header);
+            self.frame_requester.schedule_frame_in(interval);
         }
         let now = Instant::now();
         let elapsed_duration = self.elapsed_duration_at(now);
@@ -295,7 +312,7 @@ impl Renderable for StatusIndicatorWidget {
             lines.extend(details.into_iter().take(max_details));
         }
 
-        Paragraph::new(Text::from(lines)).render_ref(area, buf);
+        Paragraph::new(Text::from(lines)).render(area, buf);
     }
 }
 
@@ -324,6 +341,18 @@ mod tests {
         assert_eq!(fmt_elapsed_compact(/*elapsed_secs*/ 3600), "1h 00m 00s");
         assert_eq!(fmt_elapsed_compact(3600 + 60 + 1), "1h 01m 01s");
         assert_eq!(fmt_elapsed_compact(25 * 3600 + 2 * 60 + 3), "25h 02m 03s");
+    }
+
+    #[test]
+    fn frame_interval_is_mutation_sensitive_for_background_terminal_waits() {
+        assert_eq!(
+            frame_interval_for_header(WAITING_ON_BACKGROUND_TERMINAL_HEADER),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            frame_interval_for_header("Working"),
+            Duration::from_millis(32)
+        );
     }
 
     #[test]
@@ -424,7 +453,7 @@ mod tests {
             crate::tui::FrameRequester::test_dummy(),
             /*animations_enabled*/ false,
         );
-        w.set_interrupt_binding(Some(key_hint::plain(KeyCode::F(12))));
+        w.set_interrupt_binding(Some(key_hint::plain(KeyCode::F(12)).into()));
         w.is_paused = true;
         w.elapsed_running = Duration::ZERO;
 

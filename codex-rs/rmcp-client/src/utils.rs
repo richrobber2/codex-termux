@@ -1,13 +1,17 @@
 use anyhow::Result;
 use anyhow::anyhow;
 use codex_config::types::McpServerEnvVar;
-use reqwest::ClientBuilder;
-use reqwest::header::HeaderMap;
-use reqwest::header::HeaderName;
-use reqwest::header::HeaderValue;
+use codex_network_proxy::CUSTOM_CA_ENV_KEYS;
+use codex_protocol::shell_environment::is_non_inheritable_env_var;
+use http::HeaderMap;
+use http::HeaderName;
+use http::HeaderValue;
+use http::header::USER_AGENT;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
+
+pub(crate) const MCP_USER_AGENT: &str = concat!("codex-mcp-client/", env!("CARGO_PKG_VERSION"));
 
 pub(crate) fn create_env_for_mcp_server(
     extra_env: Option<HashMap<OsString, OsString>>,
@@ -19,55 +23,65 @@ pub(crate) fn create_env_for_mcp_server(
     } else {
         &[]
     };
-    let env = DEFAULT_ENV_VARS
+    let mut env: HashMap<OsString, OsString> = DEFAULT_ENV_VARS
         .iter()
         .copied()
         .chain(termux_env_vars.iter().copied())
         .chain(additional_env_vars)
         .filter_map(|var| env::var_os(var).map(|value| (OsString::from(var), value)))
-        .chain(extra_env.unwrap_or_default())
         .collect();
+    for name in CUSTOM_CA_ENV_KEYS {
+        let Some(value) = env::var_os(name) else {
+            continue;
+        };
+        if value.is_empty() {
+            continue;
+        }
+        let value = std::path::absolute(value)?.into_os_string();
+        #[cfg(windows)]
+        env.retain(|key, _| !key.to_string_lossy().eq_ignore_ascii_case(name));
+        env.insert(OsString::from(name), value);
+    }
+    for (name, value) in extra_env.unwrap_or_default() {
+        if cfg!(windows)
+            || name.to_str().is_some_and(|name| {
+                CUSTOM_CA_ENV_KEYS
+                    .iter()
+                    .any(|ca_name| ca_name.eq_ignore_ascii_case(name))
+            })
+        {
+            env.retain(|key, _| {
+                !key.to_string_lossy()
+                    .eq_ignore_ascii_case(&name.to_string_lossy())
+            });
+        }
+        env.insert(name, value);
+    }
+    env.retain(|name, _| {
+        name.to_str()
+            .is_none_or(|name| !is_non_inheritable_env_var(name))
+    });
     Ok(env)
 }
 
 /// codex-termux GitHub issue #10 fix — detect Termux at runtime via the
 /// `TERMUX_VERSION` environment variable (set by Termux init scripts and
-/// not present on any other Linux distribution). The Termux release line
-/// is packaged as `aarch64-unknown-linux-musl`, so `cfg!(target_os =
-/// "android")` is FALSE on the affected binary and cannot be used to
-/// gate this check. Runtime detection works on every target where the
-/// binary actually executes.
+/// not present on ordinary Linux distributions). Runtime detection keeps the
+/// behavior tied to the Termux environment and also covers older package
+/// lines that did not use the current Android target triple.
 fn running_on_termux() -> bool {
     env::var_os("TERMUX_VERSION").is_some()
 }
 
-/// codex-termux GitHub issue #11 fix — reqwest 0.13 (pulled in by the rmcp
-/// 1.7.0 upgrade, upstream `910578792f`) verifies TLS through
-/// `rustls-platform-verifier`, which on `target_os = "android"` requires an
-/// initialized JVM `Context` and panics with `Expect rustls-platform-verifier
-/// to be initialized` inside a plain Termux CLI process (no Activity, no
-/// JNI). Supplying explicit roots makes reqwest build its
-/// `WebPkiServerVerifier` branch instead, so the platform verifier is never
-/// constructed. The embedded Mozilla roots match the trust model of the
-/// reqwest 0.12 `rustls-tls` (webpki-roots) used elsewhere in the workspace.
-///
-/// Runtime-gated on `TERMUX_VERSION` like the issue #10 fix above — NOT
-/// `cfg!(target_os = "android")` — so both Termux release lines (NDK android
-/// and musl) behave the same, and desktop builds keep the default platform
-/// verifier untouched.
-pub(crate) fn apply_termux_tls(builder: ClientBuilder) -> ClientBuilder {
-    if !running_on_termux() {
-        return builder;
-    }
-    builder.tls_certs_only(webpki_root_certificates())
-}
-
-fn webpki_root_certificates() -> Vec<reqwest::Certificate> {
-    webpki_root_certs::TLS_SERVER_ROOT_CERTS
-        .iter()
-        .filter_map(|der| reqwest::Certificate::from_der(der.as_ref()).ok())
-        .collect()
-}
+// The codex-termux issue #11 TLS fix used to live here: it wrapped the
+// `reqwest` client this crate built for OAuth discovery so that Termux got
+// explicit webpki roots instead of `rustls-platform-verifier`, which panics on
+// Android without a JVM `Context`. Upstream 0.147.0 removed that client — MCP
+// OAuth discovery now runs on the injected `codex-http-client`, and `reqwest`
+// is no longer a dependency of this crate — so there is nothing left here to
+// wrap and the panicking verifier is never constructed on this path. Whether
+// the replacement's native root store works under Termux is a separate
+// question about `codex-http-client`, not about this file.
 
 pub(crate) fn create_env_overlay_for_remote_mcp_server(
     extra_env: Option<HashMap<OsString, OsString>>,
@@ -76,18 +90,24 @@ pub(crate) fn create_env_overlay_for_remote_mcp_server(
     // Remote stdio should inherit PATH/HOME/etc. from the executor side, not
     // from the orchestrator process. Only forward variables explicitly named
     // by the MCP config plus literal env overrides from that config.
-    env_vars
+    let mut env: HashMap<OsString, OsString> = env_vars
         .iter()
         .filter(|var| !var.is_remote_source())
         .filter_map(|var| env::var_os(var.name()).map(|value| (OsString::from(var.name()), value)))
         .chain(extra_env.unwrap_or_default())
-        .collect()
+        .collect();
+    env.retain(|name, _| {
+        name.to_str()
+            .is_none_or(|name| !is_non_inheritable_env_var(name))
+    });
+    env
 }
 
 pub(crate) fn remote_mcp_env_var_names(env_vars: &[McpServerEnvVar]) -> Vec<String> {
     env_vars
         .iter()
         .filter(|var| var.is_remote_source())
+        .filter(|var| !is_non_inheritable_env_var(var.name()))
         .map(|var| var.name().to_string())
         .collect()
 }
@@ -99,7 +119,10 @@ fn local_stdio_env_var_names(env_vars: &[McpServerEnvVar]) -> Result<impl Iterat
             remote_var.name()
         ));
     }
-    Ok(env_vars.iter().map(McpServerEnvVar::name))
+    Ok(env_vars
+        .iter()
+        .map(McpServerEnvVar::name)
+        .filter(|name| !is_non_inheritable_env_var(name)))
 }
 
 pub(crate) fn build_default_headers(
@@ -107,6 +130,7 @@ pub(crate) fn build_default_headers(
     env_http_headers: Option<HashMap<String, String>>,
 ) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
+    headers.insert(USER_AGENT, HeaderValue::from_static(MCP_USER_AGENT));
 
     if let Some(static_headers) = http_headers {
         for (name, value) in static_headers {
@@ -160,17 +184,6 @@ pub(crate) fn build_default_headers(
     Ok(headers)
 }
 
-pub(crate) fn apply_default_headers(
-    builder: ClientBuilder,
-    default_headers: &HeaderMap,
-) -> ClientBuilder {
-    if default_headers.is_empty() {
-        builder
-    } else {
-        builder.default_headers(default_headers.clone())
-    }
-}
-
 #[cfg(unix)]
 pub(crate) const DEFAULT_ENV_VARS: &[&str] = &[
     "HOME",
@@ -218,7 +231,7 @@ pub(crate) const TERMUX_ENV_VARS: &[&str] = &[
 ];
 
 /// Windows builds of codex-termux never run under Termux (Termux is
-/// Android/Linux musl) so the allowlist is empty. Declared explicitly so
+/// Android/Linux with Bionic) so the allowlist is empty. Declared explicitly so
 /// that `create_env_for_mcp_server` resolves the name on every target —
 /// without this, the non-Unix typecheck of the function body would fail
 /// with `unresolved name TERMUX_ENV_VARS` (caught in the 0.134.1
@@ -275,11 +288,18 @@ mod tests {
         let value = "custom".to_string();
         let expected = OsString::from(&value);
         let env = create_env_for_mcp_server(
-            Some(HashMap::from([(OsString::from("TZ"), expected.clone())])),
+            Some(HashMap::from([
+                (OsString::from("TZ"), expected.clone()),
+                (
+                    OsString::from("openai_identity_token_file"),
+                    OsString::from("/run/identity-token"),
+                ),
+            ])),
             &[],
         )
         .expect("local MCP env should build");
         assert_eq!(env.get(OsStr::new("TZ")), Some(&expected));
+        assert!(!env.contains_key(OsStr::new("openai_identity_token_file")));
     }
 
     #[test]
@@ -303,8 +323,13 @@ mod tests {
         let _default_guard = EnvVarGuard::set(default_var, "from-default");
         let _custom_guard = EnvVarGuard::set(custom_var, &custom_value);
 
-        let env =
-            create_env_overlay_for_remote_mcp_server(/*extra_env*/ None, &[custom_var.into()]);
+        let env = create_env_overlay_for_remote_mcp_server(
+            Some(HashMap::from([(
+                OsString::from("OpenAI_Federation_Rule_Id"),
+                OsString::from("rule"),
+            )])),
+            &[custom_var.into()],
+        );
 
         assert_eq!(
             env,
@@ -353,6 +378,10 @@ mod tests {
                 name: "REMOTE".to_string(),
                 source: Some("remote".to_string()),
             },
+            McpServerEnvVar::Config {
+                name: "openai_identity_token_file".to_string(),
+                source: Some("remote".to_string()),
+            },
         ]);
 
         assert_eq!(names, vec!["REMOTE".to_string()]);
@@ -383,8 +412,8 @@ mod tests {
         let prefix_value = OsString::from("/data/data/com.termux/files/usr");
         let _prefix_guard = EnvVarGuard::set("PREFIX", &prefix_value);
 
-        let env = create_env_for_mcp_server(/*extra_env*/ None, &[])
-            .expect("local MCP env should build");
+        let env =
+            create_env_for_mcp_server(/*extra_env*/ None, &[]).expect("local MCP env should build");
 
         assert_eq!(env.get(OsStr::new("PREFIX")), Some(&prefix_value));
         assert_eq!(
@@ -405,8 +434,8 @@ mod tests {
         }
         let _prefix_guard = EnvVarGuard::set("PREFIX", "/opt/leaked");
 
-        let env = create_env_for_mcp_server(/*extra_env*/ None, &[])
-            .expect("local MCP env should build");
+        let env =
+            create_env_for_mcp_server(/*extra_env*/ None, &[]).expect("local MCP env should build");
 
         assert_eq!(env.get(OsStr::new("PREFIX")), None);
 
@@ -415,28 +444,6 @@ mod tests {
                 std::env::set_var("TERMUX_VERSION", value);
             }
         }
-    }
-
-    #[test]
-    fn webpki_root_certificates_all_parse() {
-        // GitHub DioNanos/codex-termux issue #11 regression guard: every
-        // embedded Mozilla root must convert into a reqwest::Certificate,
-        // otherwise the Termux TLS trust store silently shrinks.
-        let certs = webpki_root_certificates();
-        assert!(!certs.is_empty());
-        assert_eq!(certs.len(), webpki_root_certs::TLS_SERVER_ROOT_CERTS.len());
-    }
-
-    #[test]
-    #[serial(extra_rmcp_env)]
-    fn apply_termux_tls_builds_client_on_termux() {
-        // GitHub DioNanos/codex-termux issue #11 regression guard: with the
-        // Termux gate active the client must build with explicit roots (the
-        // rustls-platform-verifier path would panic at first use on android).
-        let _guard = EnvVarGuard::set("TERMUX_VERSION", "0.118.3");
-        apply_termux_tls(ClientBuilder::new())
-            .build()
-            .expect("client with embedded webpki roots should build");
     }
 
     #[cfg(unix)]

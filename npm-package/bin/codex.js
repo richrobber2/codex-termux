@@ -7,7 +7,7 @@ import { dirname, join } from 'path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const binaryPath = join(__dirname, 'codex');
+const binaryPath = join(__dirname, 'codex.bin');
 const TERMUX_PREFIX = process.env.PREFIX || '/data/data/com.termux/files/usr';
 
 function sanitizeLdLibraryPath(binDir) {
@@ -27,6 +27,8 @@ function sanitizeLdLibraryPath(binDir) {
 
 const env = { ...process.env, CODEX_MANAGED_BY_NPM: '1' };
 const binDir = __dirname;
+// Hidden arg0 aliases must target the native ELF directly. Pointing them at
+// the shell wrapper would lose the special argv[0] when it execs codex.bin.
 env.CODEX_SELF_EXE = binaryPath;
 env.LD_LIBRARY_PATH = sanitizeLdLibraryPath(binDir);
 
@@ -88,7 +90,7 @@ function detectSubcommands() {
 const args = process.argv.slice(2);
 const first = args[0];
 const isOption = first?.startsWith('-');
-const knownSubcommands = detectSubcommands();
+const knownSubcommands = first && !isOption ? detectSubcommands() : null;
 const isKnownSubcommand = Boolean(first && knownSubcommands?.has(first));
 
 const finalArgs =
@@ -103,6 +105,15 @@ const child = spawn(binaryPath, finalArgs, {
   env
 });
 
-child.on('exit', (code) => {
-  process.exit(code);
+child.on('error', (error) => {
+  console.error(`Failed to launch bundled Codex binary: ${error.message}`);
+  process.exit(1);
+});
+
+child.on('exit', (code, signal) => {
+  if (signal) {
+    process.kill(process.pid, signal);
+    return;
+  }
+  process.exit(code ?? 1);
 });

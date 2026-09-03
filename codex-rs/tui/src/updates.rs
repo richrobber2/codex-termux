@@ -11,7 +11,10 @@ use crate::updates_cache::read_version_info;
 use crate::updates_cache::version_filepath;
 use chrono::Duration;
 use chrono::Utc;
-use codex_login::default_client::create_client;
+use codex_http_client::ClientRouteClass;
+use codex_http_client::HttpClientFactory;
+use codex_http_client::RouteAwareClientPool;
+use codex_login::default_client::default_headers;
 use serde::Deserialize;
 use std::path::Path;
 
@@ -35,11 +38,12 @@ pub fn get_upgrade_version(config: &Config) -> Option<String> {
         None => true,
         Some(info) => info.last_checked_at < Utc::now() - Duration::hours(20),
     } {
+        let http_client_factory = config.http_client_factory();
         // Refresh the cached latest version in the background so TUI startup
         // isn’t blocked by a network call. The UI reads the previously cached
         // value (if any) for this run; the next run shows the banner if needed.
         tokio::spawn(async move {
-            check_for_update(&version_file, action)
+            check_for_update(&version_file, action, http_client_factory)
                 .await
                 .inspect_err(|e| tracing::error!("Failed to update version: {e}"))
         });
@@ -54,8 +58,6 @@ pub fn get_upgrade_version(config: &Config) -> Option<String> {
     })
 }
 
-// We use the latest version from the cask if installation is via homebrew - homebrew does not immediately pick up the latest release and can lag behind.
-const HOMEBREW_CASK_API_URL: &str = "https://formulae.brew.sh/api/cask/codex.json";
 const LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/DioNanos/codex-termux/releases/latest";
 const NPM_LATEST_URL: &str = "https://registry.npmjs.org/@mmmbuto%2fcodex-cli-termux/latest";
@@ -66,33 +68,32 @@ struct ReleaseInfo {
 }
 
 #[derive(Deserialize, Debug, Clone)]
-struct HomebrewCaskInfo {
-    version: String,
-}
-
-#[derive(Deserialize, Debug, Clone)]
 struct NpmLatestInfo {
     version: String,
 }
 
-async fn check_for_update(version_file: &Path, action: Option<UpdateAction>) -> anyhow::Result<()> {
+async fn check_for_update(
+    version_file: &Path,
+    action: Option<UpdateAction>,
+    http_client_factory: HttpClientFactory,
+) -> anyhow::Result<()> {
+    let client_pool = RouteAwareClientPool::with_chatgpt_cloudflare_cookies(
+        http_client_factory,
+        ClientRouteClass::Other,
+    )
+    .with_legacy_custom_ca_fallback();
     let source = current_update_source(action);
     let latest_version = match action {
-        Some(UpdateAction::BrewUpgrade) => {
-            let HomebrewCaskInfo { version } = create_client()
-                .get(HOMEBREW_CASK_API_URL)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<HomebrewCaskInfo>()
-                .await?;
-            version
-        }
+        // This fork is not distributed through Homebrew, so a brew install can
+        // only have come from the npm package; ask the registry directly for the
+        // published version instead of upstream's two-step release/npm check.
         Some(UpdateAction::NpmGlobalLatest)
         | Some(UpdateAction::BunGlobalLatest)
-        | Some(UpdateAction::PnpmGlobalLatest) => {
-            let NpmLatestInfo { version } = create_client()
+        | Some(UpdateAction::PnpmGlobalLatest)
+        | Some(UpdateAction::BrewUpgrade) => {
+            let NpmLatestInfo { version } = client_pool
                 .get(NPM_LATEST_URL)
+                .headers(default_headers())
                 .send()
                 .await?
                 .error_for_status()?
@@ -101,7 +102,7 @@ async fn check_for_update(version_file: &Path, action: Option<UpdateAction>) -> 
             version
         }
         Some(UpdateAction::StandaloneUnix) | Some(UpdateAction::StandaloneWindows) | None => {
-            fetch_latest_github_release_version().await?
+            fetch_latest_github_release_version(&client_pool).await?
         }
     };
 
@@ -129,18 +130,21 @@ fn current_update_source(action: Option<UpdateAction>) -> &'static str {
         Some(UpdateAction::NpmGlobalLatest) => "npm",
         Some(UpdateAction::BunGlobalLatest) => "bun",
         Some(UpdateAction::PnpmGlobalLatest) => "pnpm",
-        Some(UpdateAction::BrewUpgrade) => "brew",
+        Some(UpdateAction::BrewUpgrade) => "npm",
         Some(UpdateAction::StandaloneUnix) | Some(UpdateAction::StandaloneWindows) | None => {
             "github-release"
         }
     }
 }
 
-async fn fetch_latest_github_release_version() -> anyhow::Result<String> {
+async fn fetch_latest_github_release_version(
+    client_pool: &RouteAwareClientPool,
+) -> anyhow::Result<String> {
     let ReleaseInfo {
         tag_name: latest_tag_name,
-    } = create_client()
+    } = client_pool
         .get(LATEST_RELEASE_URL)
+        .headers(default_headers())
         .send()
         .await?
         .error_for_status()?
